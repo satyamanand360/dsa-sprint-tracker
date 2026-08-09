@@ -11,7 +11,6 @@ import streamlit as st
 # ---------------------------------------------------------------------------
 st.set_page_config(page_title="DSA Sprint Tracker", page_icon="✅", layout="centered")
 
-DATA_FILE = "tracker_state.json"
 START_DATE = date(2026, 8, 9)
 DEADLINE = date(2026, 9, 15)
 
@@ -86,21 +85,70 @@ def fresh_plan():
 
 
 # ---------------------------------------------------------------------------
-# Persistence (simple JSON file — see README for limitations on hosted Streamlit)
+# Persistence — Google Sheets in production, local JSON file for local dev
 # ---------------------------------------------------------------------------
+LOCAL_FALLBACK_FILE = "tracker_state.json"
+
+
+def _sheets_configured():
+    try:
+        return "gcp_service_account" in st.secrets and "SHEET_ID" in st.secrets
+    except Exception:
+        return False
+
+
+@st.cache_resource(show_spinner=False)
+def _get_worksheet():
+    import gspread
+    from google.oauth2.service_account import Credentials
+
+    scopes = [
+        "https://www.googleapis.com/auth/spreadsheets",
+        "https://www.googleapis.com/auth/drive",
+    ]
+    creds = Credentials.from_service_account_info(
+        st.secrets["gcp_service_account"], scopes=scopes
+    )
+    client = gspread.authorize(creds)
+    sh = client.open_by_key(st.secrets["SHEET_ID"])
+    try:
+        ws = sh.worksheet("tracker_data")
+    except Exception:
+        ws = sh.add_worksheet(title="tracker_data", rows=10, cols=2)
+    return ws
+
+
 def load_state():
-    if os.path.exists(DATA_FILE):
+    if _sheets_configured():
         try:
-            with open(DATA_FILE) as f:
+            ws = _get_worksheet()
+            val = ws.acell("A1").value
+            if val:
+                return json.loads(val)
+            return fresh_plan()
+        except Exception as e:
+            st.warning(f"Couldn't load saved progress from Google Sheets, starting fresh: {e}")
+            return fresh_plan()
+    if os.path.exists(LOCAL_FALLBACK_FILE):
+        try:
+            with open(LOCAL_FALLBACK_FILE) as f:
                 return json.load(f)
         except Exception:
-            return fresh_plan()
+            pass
     return fresh_plan()
 
 
 def save_state():
+    if _sheets_configured():
+        try:
+            ws = _get_worksheet()
+            ws.update_acell("A1", json.dumps(st.session_state.days))
+            return
+        except Exception as e:
+            st.warning(f"Couldn't save progress to Google Sheets: {e}")
+            return
     try:
-        with open(DATA_FILE, "w") as f:
+        with open(LOCAL_FALLBACK_FILE, "w") as f:
             json.dump(st.session_state.days, f)
     except Exception as e:
         st.warning(f"Couldn't save progress: {e}")
